@@ -23,6 +23,7 @@
   },
   "dependencies": {
     "pg": "~2.11.1",
-    "q": "~1.0.1"
+    "q": "~1.0.1",
+    "fluentchain": "git+ssh://git@github.com/letsface/fluentchain.git"
   }
 }

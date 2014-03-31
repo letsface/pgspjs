@@ -291,3 +291,4 @@ function exportStoredProcs(dsn) {
 
 
 exports.exportStoredProcs = exportStoredProcs;
+exports.connect = connect;
