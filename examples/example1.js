@@ -8,6 +8,7 @@ function main(dataSourceName, $log) {
   return pgspjs
     .connect(dataSourceName)
     .then(function(connection) {
+      // example stored procedures
       var example1 = fs.readFileSync(
         __dirname + '/example1.sql',
         'utf8');    

@@ -1,3 +1,6 @@
+-- using plpgsql for the example so we don't have to require additional extensions
+-- but pgspjs supports any of the function
+-- language supported by PostgreSQL, especially plv8 (Javascript)
 CREATE OR REPLACE FUNCTION example1_test_function()
 RETURNS text
 AS
