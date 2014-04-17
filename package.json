@@ -4,7 +4,7 @@
   "description": "Auto-proxy PostgreSQL Stored Procedures",
   "main": "sp.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "node_modules/jasmine-node/bin/jasmine-node spec"
   },
   "repository": {
     "type": "git",
@@ -25,5 +25,8 @@
     "pg": "~2.11.1",
     "q": "~1.0.1",
     "fluentchain": "git+ssh://git@github.com/letsface/fluentchain.git"
+  },
+  "devDependencies": {
+    "jasmine-node": "~1.14.3"
   }
 }

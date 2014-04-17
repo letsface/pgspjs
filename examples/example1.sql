@@ -15,7 +15,7 @@ $$
 LANGUAGE plpgsql;
 
 
-DROP TABLE IF EXISTS example1_table ;
+DROP TABLE IF EXISTS example1_table;
 CREATE TABLE example1_table(record_name NAME, record_value int);
 
 INSERT INTO example1_table VALUES('testrecord', 42);

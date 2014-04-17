@@ -14,5 +14,10 @@ FROM
     pg_namespace
 WHERE 
     pg_namespace.oid = pg_proc.pronamespace
-    AND pg_namespace.nspname = 'public'
     AND prorettype = pg_type.oid
+    -- schema (public by default)
+    AND (
+        pg_namespace.nspname = 'public' 
+        OR pg_namespace.nspname = $1  
+    )
+    

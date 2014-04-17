@@ -1,56 +1,47 @@
 'use strict';
 
-var pgspjs = require('../sp.js');
+var sp = require('../sp.js');
 var fs = require('fs');
 
-function main(dataSourceName, $log) {
+function main(spConfig, $log) {
   var sps;
-  return pgspjs
-    .connect(dataSourceName)
-    .then(function(connection) {
-      // example stored procedures
-      var example1 = fs.readFileSync(
+  var store = {};
+  
+  spConfig.onConnection = function() {
+    return fs.readFileSync(
         __dirname + '/example1.sql',
-        'utf8');    
-      return connection.queryNoTransaction(example1);
-    })
-    .then(function() {
-      return pgspjs.exportStoredProcs(dataSourceName);
-    })
+        'utf8');
+  }
+
+  return sp
+    .exportStoredProcs(spConfig)
     .then(function(s) {
       sps = s;
       return sps
         .transaction()
         .example1_test_function()
+        .store('strtest', store)
         .promiseData();
     })
-    .then(function(result) {
-      $log.log(result);
-    })
     .then(function() {
-      var store = {};
       return sps
         .transaction()
         .example1_modify('testrecord', 0)
         .promiseData()
     })    
     .then(function() {
-      var store = {};
       return sps
         .transaction()
         .example1_retrieve('testrecord')
-        .store(store, 'step1')
+        .store('step1', store)
         .example1_modify('testrecord', 10)
         .example1_retrieve('testrecord')
-        .store(store, 'step2')
+        .store('step2', store)
         .example1_modify('testrecord', 20)
         .example1_retrieve('testrecord')
-        .store(store, 'step3')
+        .store('step3', store)
         .rollback()
         .promiseNoData()
-        .then(function() {
-          $log.log(JSON.stringify(store));
-        });
     })
     .then(function() {
       return sps
@@ -59,32 +50,34 @@ function main(dataSourceName, $log) {
         .rollback()
         .promiseData()
     })
-    .then(function(value) {
-      $log.log(value);
+    .then(function() {
+      sps.end();
+      return store;
     });
 }
 
 exports.main = main;
 
-// Usage:
+// Usage (assuming you already have a DB with your username):
 //
-// createdb testdb
-// node example1.js postgresql://$USER@localhost/testdb 
+// node example1.js postgresql://$USER@localhost/$USER 
 //
 // Output: 
 //
-// Hello world
-// {"step1":0,"step2":10,"step3":20}
-// 0
+// { strtest: 'Hello world', step1: 0, step2: 10, step3: 20 }
+
 if(require.main === module) {
   var dsn = process.argv[2];
   if(!dsn) {
     console.log('need to specify a datasource');
-    console.log('example: node example1.js postgresql://$USER@localhost/testdb');
+    console.log('example: node example1.js postgresql://$USER@localhost/$USER');
     return;
   }
   console.log('connecting to ' + dsn);
-  main(dsn, console)
+  main({dsn: dsn}, console)
+    .then(function(output) {
+      console.log(output);
+    })
     .fail(function(err) {
       console.log(err.message);
       console.log(err.stack);
@@ -93,4 +86,5 @@ if(require.main === module) {
       process.exit();
     })
     .done();
+  
 }
