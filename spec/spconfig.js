@@ -1,8 +1,11 @@
 'use strict';
 
-module.exports = {
-  dsn: 'postgresql://' 
-      + process.env['USER'] 
-      + '@localhost/' 
-      + process.env['USER']
+function newConfig() {
+  return {
+    dsn: 'postgresql://'
+        + process.env['USER']
+        + '@localhost/'
+        + process.env['USER']
+  }
 }
+exports.newConfig = newConfig;

@@ -6,7 +6,13 @@ var pg = require('pg');
 var Q = require('q');
 var util = require('util');
 
+
 var DEBUG_ENABLED = !!process.env['API_NG_DEBUG_ENABLED']
+Q.longStackSupport = DEBUG_ENABLED;
+
+pg.on('error', function(err) {
+  console.log('PG emitted error: ' + err.message);
+});
 
 function generate_args_placeholder(count) {
   var params = '('
@@ -34,16 +40,16 @@ function clientErrorHandling(err) {
     // TODO: re-emit as part of our connection?
     console.log('error in pg client: ' + err.message);
   }
-}  
+}
 
 var connectionCount = 0;
 
-function Connection(client, spConfig, done) {
+function Connection(client, spConfig, done, context) {
   var self = this;
   self.client = client;
   self.connectionCount = connectionCount++;
   function id() {
-    return 'C' + self.connectionCount + ' ';
+    return 'C' + self.connectionCount + ':' + context;
   }
 
   var status = NO_TRANSACTION;
@@ -65,56 +71,60 @@ function Connection(client, spConfig, done) {
       return Q.reject(new Error(id() + 'Transaction already started or ended'));
     }
 
-    var deferred = Q.defer();
-    client.query('BEGIN', function(err) {
-      if(err) {
-        self.rollback().then(function() {
-          deferred.reject(new Error(id() + 'Could not begin transaction ' + err));
-        });
-      }
-      status = TRANSACTION_ONGOING;
-      deferred.resolve();
-    });
-    return deferred.promise;    
+    return client
+      .queryPromise('BEGIN')
+      .then(function() {
+        status = TRANSACTION_ONGOING;
+      })
+      .fail(function(err) {
+        status = TRANSACTION_ENDED;
+        var msg = id() + 'Could not begin transaction ' + err;
+        console.log(msg);
+        done(err);
+      });
   }
 
   self.commit = function() {
     if(status !== TRANSACTION_ONGOING) {
-      return Q.reject(new Error(id() + 'Transaction already started or ended: ' + status));
-    }    
-    var deferred = Q.defer();
-    client.query('COMMIT', function(err) {
-      if(err) {
-        self.rollback().then(function() {
-          deferred.reject(new Error(id() + 'Could not commit transaction ' + err));
-        });
-      }
-      DEBUG_ENABLED && console.log(id() + 'returning client to pool');
-      done(err);
-      status = TRANSACTION_ENDED;
-      deferred.resolve();
-    });
-    return deferred.promise;    
+      return Q.reject(new Error(id() + 'Transaction not started or ended: ' + status));
+    }
+    return client
+      .queryPromise('COMMIT')
+      .then(function() {
+        DEBUG_ENABLED && console.log(id() + 'returning client to pool');
+        done();
+        status = TRANSACTION_ENDED;
+      })
+      .fail(function(err) {
+        self.rollback().done(
+          function() { done(err); },
+          function() {
+            var msg = id() + 'Could not commit transaction ' + err;
+            console.log(msg);
+            // whether rollback fails or not, we return client with err
+            done(err);
+          });
+      });
   }
 
   self.rollback = function() {
     if(status !== TRANSACTION_ONGOING) {
       return Q.reject(new Error(id() + 'Transaction not started or already ended'));
-    }        
+    }
     var deferred = Q.defer();
-    client.query('ROLLBACK', function(err) { 
-      status = TRANSACTION_ENDED;      
+    client.query('ROLLBACK', function(err) {
+      status = TRANSACTION_ENDED;
       if(err) {
         DEBUG_ENABLED && console.log(id() + 'returning client to pool with error ' + err.message);
-        done(err);        
+        done(err);
         deferred.reject(new Error(id() + 'Could not rollback transaction ' + err));
       } else {
         DEBUG_ENABLED && console.log(id() + 'returning client after rollback');
         done();
-        deferred.resolve();  
+        deferred.resolve();
       }
     });
-    return deferred.promise;    
+    return deferred.promise;
   }
 
   function onQuery(client, query, args) {
@@ -129,8 +139,8 @@ function Connection(client, spConfig, done) {
   self.queryInTransaction = function(query, args) {
     if(status !== TRANSACTION_ONGOING) {
       return Q.reject(new Error(id() + 'Transaction not started or already ended'));
-    }              
-    
+    }
+
     return onQuery(client, query, args)
       .then(function() {
         DEBUG_ENABLED && console.log(id() + 'executing actual query ' + query);
@@ -141,8 +151,8 @@ function Connection(client, spConfig, done) {
             return self
               .rollback()
               .then(function() {
-                throw new Error(query +' with [' + args + '] failed: ' + err.message);
-              });            
+                console.log(query +' with [' + args + '] failed: ' + err.message);
+              });
           });
       });
   }
@@ -156,10 +166,6 @@ function Connection(client, spConfig, done) {
       .then(function() {
         return client.queryPromise(query, args);
       });
-  }
-
-  self.end = function() {
-    done();
   }
 }
 
@@ -177,34 +183,37 @@ function bindStoredProcToFluent(target, results){
             args[i] = args[i]();
           }
         }
-        
+
         return target.connection
           .queryInTransaction(query, args)
           .then(function(results) {
             DEBUG_ENABLED && console.log('executed ' + row.proname);
             return results.rows[0][row.proname];
-          });         
+          });
       })
       return target;
     }
-  });  
+  });
 }
 
 
 var transactionCount = 0;
 
-function Transaction(spConfig, results, role, connect) {
+function Transaction(spConfig, results, role, connect, context) {
   Transaction.super_.call(this);
+
   var self = this;
+
+  context = context ? context + ' ' : process.pid +' ';
 
   self.transactionId = transactionCount++;
   function id() {
-    return 'T' + self.transactionId + ' ';
+    return 'T' + self.transactionId + ':' + role + ':' + context;
   }
   // start with connecting (ie: getting client from client pool)
   // and then start transaction
   self.chain(function() {
-      return connect()
+      return connect(context)
         .then(function(conn) {
           DEBUG_ENABLED && console.log('connected to ' + spConfig.dsn);
           self.connection = conn;
@@ -215,7 +224,7 @@ function Transaction(spConfig, results, role, connect) {
             var onTransaction = spConfig.onTransaction(role);
             DEBUG_ENABLED && console.log(id() + 'executing onTransaction');
             // we send initialization within the current transaction
-            return self.connection.queryInTransaction(onTransaction);            
+            return self.connection.queryInTransaction(onTransaction);
           }
         });
     });
@@ -232,7 +241,7 @@ function Transaction(spConfig, results, role, connect) {
           .commit()
           .then(function() {
             return previousStepData;
-          });  
+          });
       } else {
         return previousStepData;
       }
@@ -244,7 +253,7 @@ function Transaction(spConfig, results, role, connect) {
   self.promiseNoData = function() {
     self.chain(function() {
       if(self.connection.active()) {
-        return self.connection.commit();    
+        return self.connection.commit();
       }
     });
 
@@ -267,7 +276,7 @@ function Transaction(spConfig, results, role, connect) {
           return previousStepData;
         });
     });
-    return self;    
+    return self;
   }
 
   self.rollback = function() {
@@ -281,12 +290,34 @@ function Transaction(spConfig, results, role, connect) {
     return self;
   }
 
-  bindStoredProcToFluent(self, results);    
+  bindStoredProcToFluent(self, results);
 }
 util.inherits(Transaction, fluent);
 
+function pgEndPromise() {
+  DEBUG_ENABLED && console.log('calling pg.end()');
 
-function StoredProcs(dsn, results, connect) {
+  var deferred = Q.defer();
+  pg.once('end', function() {
+    DEBUG_ENABLED && console.log('pg.end received');
+    deferred.resolve();
+  });
+  pg.once('error', function(err) {
+    deferred.reject(err);
+  });
+
+  var pool = pg.pools.all[Object.keys(pg.pools.all)[0]];
+  if(pool) {
+    var inUse = pool.getPoolSize() - pool.availableObjectsCount();
+    if(inUse) {
+      console.log('WARNING: You have called pg.end() but you still have connections in use: ' + inUse);
+    }
+  }
+  pg.end();
+  return deferred.promise;
+}
+
+function StoredProcs(spConfig, results, connect) {
   var self = this;
 
   self.COUNT = results.rowCount;
@@ -303,32 +334,48 @@ function StoredProcs(dsn, results, connect) {
   }
 
   // new client with its own connection and local role
-  self.transaction = function(role) {
-    return new Transaction(dsn, results, role, connect);
+  self.transaction = function(role, context) {
+    return new Transaction(spConfig, results, role, connect, context);
   }
 
   self.end = function() {
-    DEBUG_ENABLED && console.log('calling pg.end()');
-    pg.end();
+    var beforeEnd;
+
+    if(typeof spConfig.beforeEnd == 'function') {
+      DEBUG_ENABLED && console.log('executing beforeEnd');
+      beforeEnd = connect('beforeEnd')
+        .then(function(connection) {
+          return connection.begin()
+            .then(function() {
+              return spConfig.beforeEnd(connection);
+            })
+            .then(function() {
+              return connection.commit();
+            })
+            .then(function() {
+              DEBUG_ENABLED && console.log('beforeEnd completed');
+            });
+        });
+    } else {
+      beforeEnd = Q();
+    }
+
+    return beforeEnd
+      .then(function() {
+        return pgEndPromise();
+      });
   }
 }
 
-
-function wrapInTransaction(statements)  {
-  return 'BEGIN;\n' + statements + '\nCOMMIT;'
-}
-
-
 var queryCount = 0;
 
-
-function createQueryPromiseFunction(client) {
+function createQueryPromiseFunction(client, context) {
   function queryPromise(query, args) {
     var currentCount = queryCount++;
 
     function id() {
-      return 'Q' + currentCount + ' ';
-    } 
+      return 'Q' + currentCount + ': ' + context + ' ';
+    }
 
     var deferredQueryResults = Q.defer();
     client.query(query, args, function(err, results) {
@@ -349,14 +396,13 @@ function createQueryPromiseFunction(client) {
 
 
 function exportStoredProcs(spConfig) {
-  var connection;
   spConfig.schema = spConfig.schema ? spConfig.schema : 'public';
 
   if(typeof spConfig.dsn !== 'string') {
     throw new Error('dsn property needs to be specified');
   }
 
-  function connect() {
+  function connect(context) {
     DEBUG_ENABLED && console.log('connect called with ' + spConfig.dsn);
     var deferredConnection = Q.defer();
 
@@ -366,10 +412,10 @@ function exportStoredProcs(spConfig) {
         return;
       }
 
-      DEBUG_ENABLED && console.log('retrieved client from pool with count ' + client.__pool_count);
+      DEBUG_ENABLED && console.log('retrieved client from pool with count ' + client.poolCount);
 
       // monkey-patch a nicer promise interface to client
-      client.queryPromise = createQueryPromiseFunction(client);
+      client.queryPromise = createQueryPromiseFunction(client, context);
 
       // catch emitted errors
       client.on('error', function(err) {
@@ -378,20 +424,22 @@ function exportStoredProcs(spConfig) {
 
       // client is from pool; if it's the first time out of the pool
       // call initialization function
+      var connection = new Connection(client, spConfig, done, context);
       var onConnectionPromise;
-      if(client.__pool_count === 1 && spConfig.onConnection) {
-        var onConnection = wrapInTransaction(spConfig.onConnection());
+      if(client.poolCount === 1 && spConfig.onConnection) {
         DEBUG_ENABLED && console.log('executing onConnection');
-        onConnectionPromise = client.queryPromise(onConnection)
-          .then(function() { DEBUG_ENABLED && console.log('onConnection completed')});
+        onConnectionPromise = spConfig
+          .onConnection(connection)
+          .then(function() {
+            DEBUG_ENABLED && console.log('onConnection completed')
+          });
       } else {
         onConnectionPromise = Q();
-        
       }
 
       onConnectionPromise
         .then(function() {
-          deferredConnection.resolve(new Connection(client, spConfig, done));
+          deferredConnection.resolve(connection);
         })
         .fail(function(err) {
           deferredConnection.reject(new Error('error initing connection ' + err))
@@ -401,29 +449,34 @@ function exportStoredProcs(spConfig) {
     return deferredConnection.promise;
   }
 
-  return connect()
-    .then(function(conn) {
-      connection = conn;
-    })
-    .then(function() {
-      if(typeof spConfig.beforeLoad === 'function') {
-        return spConfig.beforeLoad(connection.client);
-      }
-    })
-    .then(function() {
-      var queryListOfProcs = fs.readFileSync(
-        __dirname + '/sp.sql',
-        'utf8');
+  return connect('exportStoredProcs')
+    .then(function(connection) {
+      return connection
+      .begin()
+      .then(function() {
+        if(typeof spConfig.beforeLoad === 'function') {
+          DEBUG_ENABLED && console.log('calling beforeLoad');
+          return spConfig.beforeLoad(connection);
+        }
+      })
+      .then(function() {
+        var queryListOfProcs = fs.readFileSync(
+          __dirname + '/sp.sql',
+          'utf8');
 
-      return connection.queryNoTransaction(queryListOfProcs, [spConfig.schema]);
-    })
-    .then(function(results) {
-      DEBUG_ENABLED && console.log('committing connection used to retrieved stored procedures');
-      // if you did not have any transaction but want to 
-      // release the client, call connection.end()
-      connection.end();
-      return new StoredProcs(spConfig, results, connect);    
-    });      
+        return connection.queryInTransaction(queryListOfProcs, [spConfig.schema]);
+      })
+      .then(function(results) {
+        DEBUG_ENABLED && console.log('committing connection used to retrieved stored procedures');
+        // if you did not have any transaction but want to
+        // release the client, call connection.end()
+        return connection
+          .commit()
+          .then(function() {
+           return new StoredProcs(spConfig, results, connect);
+          });
+      })
+    });
 }
 
 

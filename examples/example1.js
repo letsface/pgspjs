@@ -6,11 +6,12 @@ var fs = require('fs');
 function main(spConfig, $log) {
   var sps;
   var store = {};
-  
-  spConfig.onConnection = function() {
-    return fs.readFileSync(
+
+  spConfig.onConnection = function(connection) {
+    var example1 = fs.readFileSync(
         __dirname + '/example1.sql',
-        'utf8');
+        'utf8').toString();
+    return connection.client.queryPromise(example1);
   }
 
   return sp
@@ -28,7 +29,7 @@ function main(spConfig, $log) {
         .transaction()
         .example1_modify('testrecord', 0)
         .promiseData()
-    })    
+    })
     .then(function() {
       return sps
         .transaction()
@@ -45,13 +46,15 @@ function main(spConfig, $log) {
     })
     .then(function() {
       return sps
-        .transaction()      
+        .transaction()
         .example1_retrieve('testrecord')
         .rollback()
         .promiseData()
     })
     .then(function() {
-      sps.end();
+      return sps.end();
+    })
+    .then(function() {
       return store;
     });
 }
@@ -60,9 +63,9 @@ exports.main = main;
 
 // Usage (assuming you already have a DB with your username):
 //
-// node example1.js postgresql://$USER@localhost/$USER 
+// node example1.js postgresql://$USER@localhost/$USER
 //
-// Output: 
+// Output:
 //
 // { strtest: 'Hello world', step1: 0, step2: 10, step3: 20 }
 
@@ -76,15 +79,12 @@ if(require.main === module) {
   console.log('connecting to ' + dsn);
   main({dsn: dsn}, console)
     .then(function(output) {
-      console.log(output);
+      console.log(JSON.stringify(output));
     })
     .fail(function(err) {
       console.log(err.message);
       console.log(err.stack);
     })
-    .finally(function() {
-      process.exit();
-    })
     .done();
-  
+
 }
