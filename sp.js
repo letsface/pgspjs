@@ -184,9 +184,13 @@ function bindStoredProcToFluent(target, results){
           }
         }
 
-        return target.connection
+        return target
+          .connection
           .queryInTransaction(query, args)
           .then(function(results) {
+            if(!results) {
+              throw new Error('No results from query: ' + query + ' with args ' + args);
+            }
             DEBUG_ENABLED && console.log('executed ' + row.proname);
             return results.rows[0][row.proname];
           });
